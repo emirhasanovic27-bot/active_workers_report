@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Active Workers Report Generator</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+  :root{
+    --bg:#0f1216; --panel:#171c22; --panel2:#1d242c; --line:#2a323c;
+    --ink:#e6edf3; --mut:#8b97a4; --acc:#4f9cf9; --acc2:#2d7be0;
+    --ok:#3fb950; --warn:#d29922; --err:#f85149; --chip:#222b34;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:14px/1.5 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+  header{padding:22px 26px;border-bottom:1px solid var(--line);
+    background:linear-gradient(180deg,#141a20,#0f1216)}
+  h1{margin:0;font-size:19px;letter-spacing:.2px}
+  header p{margin:6px 0 0;color:var(--mut);font-size:13px}
+  .wrap{max-width:980px;margin:0 auto;padding:22px 26px 60px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px;margin-top:8px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+    padding:16px;display:flex;flex-direction:column;gap:10px}
+  .card h3{margin:0;font-size:14px;display:flex;align-items:center;gap:8px}
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--acc)}
+  .meta{color:var(--mut);font-size:12px;min-height:16px}
+  .drop{border:1.5px dashed var(--line);border-radius:9px;padding:14px;text-align:center;
+    color:var(--mut);cursor:pointer;transition:.15s;font-size:12.5px;background:var(--panel2)}
+  .drop:hover,.drop.hot{border-color:var(--acc);color:var(--ink);background:#1a232c}
+  .drop.done{border-color:var(--ok);color:var(--ink)}
+  input[type=file]{display:none}
+  .status{font-size:12px;min-height:16px}
+  .ok{color:var(--ok)} .warn{color:var(--warn)} .err{color:var(--err)}
+  .bar{margin-top:18px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+  button.go{background:var(--acc2);color:#fff;border:0;padding:11px 20px;border-radius:9px;
+    font-size:14px;font-weight:600;cursor:pointer}
+  button.go:hover{background:var(--acc)} button.go:disabled{opacity:.4;cursor:not-allowed}
+  button.ghost{background:transparent;border:1px solid var(--line);color:var(--mut);
+    padding:10px 16px;border-radius:9px;cursor:pointer;font-size:13px}
+  button.ghost:hover{color:var(--ink);border-color:var(--acc)}
+  .summary{margin-top:20px;background:var(--panel);border:1px solid var(--line);
+    border-radius:12px;padding:0;overflow:hidden;display:none}
+  .summary.show{display:block}
+  .summary h2{margin:0;padding:14px 18px;font-size:14px;border-bottom:1px solid var(--line);
+    background:var(--panel2)}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:9px 18px;border-bottom:1px solid var(--line)}
+  th{color:var(--mut);font-weight:500;font-size:11.5px;text-transform:uppercase;letter-spacing:.4px}
+  td.num{text-align:right;font-variant-numeric:tabular-nums}
+  .pill{display:inline-block;padding:2px 8px;border-radius:20px;font-size:11px;background:var(--chip)}
+  .pill.miss{background:#3a2a1a;color:var(--warn)}
+  .note{color:var(--mut);font-size:12px;margin-top:14px;line-height:1.6}
+  .dbtag{font-size:11px;color:var(--mut);background:var(--chip);padding:3px 9px;border-radius:20px}
+  a.dl{display:inline-block;margin-top:4px}
+</style>
+</head>
+<body>
+<header>
+  <h1>Active Workers Report Generator</h1>
+  <p>Upload a Custom Export per program. Google takes two exports (GTNP + EMEA) that merge into one tab; if you have no EMEA, just upload GTNP. Location is filled automatically from the internal historical database. <span class="dbtag" id="dbtag">database loading…</span></p>
+</header>
+<div class="wrap">
+  <div class="grid" id="grid"></div>
+
+  <div class="bar">
+    <button class="go" id="genBtn" disabled>Generate Report</button>
+    <button class="ghost" id="resetBtn">Reset all</button>
+    <span class="meta" id="globalMeta"></span>
+  </div>
+
+  <div class="summary" id="summary">
+    <h2>Generation summary</h2>
+    <table>
+      <thead><tr><th>Program → Tab</th><th class="num">Active workers</th><th class="num">Location filled</th><th class="num">Location blank</th></tr></thead>
+      <tbody id="sumBody"></tbody>
+    </table>
+  </div>
+
+  <div class="note">
+    <b>How it works.</b> Each Custom Export is transaction-level (one row per day worked). The app de-duplicates to one row per active worker (by Username), keeping the most recent / highest-level entry. The <b>Location</b> column is never read from the export — it is looked up in an invisible internal database built from the previous monthly reports. If a username isn't in the database, Location is left blank. <b>Google</b> takes two exports — GTNP and EMEA — which merge into the one Google tab (GTNP first, then EMEA); upload only GTNP if there's no EMEA. <b>Hitachi</b> BR, DC and DM arrive in a single export and write to one <b>Hitachi MS Programs</b> tab with no sub-program distinction.
+  </div>
+</div>
+
+<script>
+const LOCATION_DB = {"hifari":"Pakistan, , Karachi","juliastavros81":"Romania, , Bucharest","7715c6cd":"Slovakia, NI, Zirany","marwasalem":"Saudi Arabia, , Riyadh","alessandro2502":"New Zealand, CAN, Lincoln","koalaconsulting":"Croatia, , Split","1ce58456":"Czech Republic, JIHOCESKY, Vodnany","dutch_matthias":"Albania, Durres, Fushe-Kruje","kontio-tuuli":"Estonia, , Tallinn","christellel":"Thailand, KRABI, Saladan","dave12345678":"Cambodia, , Sihanoukville","326c5bf0":"Israel, TA, Tel Aviv","kkb123":"India, KA, Bengaluru","judit_csato":"Hungary, , Szeged","judithchanutomo":"Indonesia, SURABAYA CITY, Surabaya","parisisabina":"Bulgaria, , Sofia","shinjijw":"Paraguay, Itapua, Encarnacion","kim_yeongha":"Slovakia, BL, Bratislava","azlinajalil":"Malaysia, , Kota Kinabalu","ruinasjon":"Cambodia, Kampot, Kampot","hamidrzah":"Azerbaijan, , Baku","anlaszpen":"Malaysia, , Georgetown","carminabostan":"Romania, Iasi County, Iasi","opavelko":"Ukraine, , Zaporizhia","39dc0f3e":"Malaysia, Penang, Bukit Mertajam","anaruiz88":"Colombia, , Medelln","mattborjesson":"Thailand, ,","62641ade":"Thailand, Bangkok, Bangkok","2a22823f":"Taiwan, TPE, Taoyuan City","mmirac":"Turkey, , Ankara","olesiabil":"Ukraine, KYIV CITY, Kyiv","7d896dc5":"Vietnam, , Ho Chi Minh City","4cac3330":"Malta, Saint John, San Gwann","axolotista":"Mexico, , TepoztlÃ¡n","samuel_brien":"Cambodia, , Battambang","fabianpg1212":"Colombia, , Bogota","4269dc81":"Annaba, Algeria","cf8d3d0b":"Sarawak, Malaysia","4d8b8c16":"Taiwan","26b275f2":"Virovitick-Podravska, Croatia","bokil":"Auckland, New Zealand","46460bef":"Amman, Jordan","db21898f":"Cotonou, Benin","lschelbert":"Saint Mark, Dominica","orentaub1111":"Israel","ac731170":"Chennai, New Delhi","imoci13":"Szolnok, Hungary","a1claire":"Yogyakarta, Indonesia","a645b156":"Medellin, Colombia","b2e68497":"Honolulu, United States","madskaron":"Auckland, New Zealand","2c310a5d":"Kuala Lumpur, malaysia","8cf614ae":"NC, United States","3f46fce7":"Istanbul, turkey","b81f24a8":"Dubai, United Arab Emirates","a95254ca":"CAN, New Zealand","lilac_blossom":"Valcea, Romania","6b5dd21f":"Kharkiv, Ukraine","thomas_2000":"Slovakia","6e6f6673":"Bangkok, Thailand","kesirm":"Ankara, Turkey","bryvic":"LVIV Oblast, Ukraine","aec87244":"Vietnam","6e3c70db":"Nairobi Area, Kenya","kim_sorensen":"Texas, United States","248a8887":"Mexico, Mexico City, Mexico City","31b80e95":"Suriname, WA, Lelydorp","fassi_hamza":"Morocco, SOUSS-MASSA, Agadir","f9559efa":"Taiwan, KHH, Kaohsiung","nathalie2625":"United States, Fontana","byseamandbyhand":"United States, Mobile","maikoc":"United States, Lake Wylie","ellebuzin":"United States, Springfield","mtaruhuff":"United States, Oxford","lineheiberg":"United States, Altoona","imin0219":"United States, Waukegan","leneyoung":"United States, Henderson","wjdtheka05":"United States, Fishers","akambe26":"United States, Torrance","bostontranslator":"United States, South Hill","xsc2014":"Canada, Winnipeg","fankor":"Canada, North York","guillaumegodin":"Canada, Oka","ptolomaios13":"Canada, Burnaby","angiemjv":"Canada, Bradford","se_wang":"United States, Philadelphia","deborahpueblos":"Philippines, Butuan","annalyn_lee":"Philippines, Cebu City","amr-el_shawadfy":"Egypt, El mansoura","kirollosashraf10":"Egypt, Cairo","goddess888":"Philippines, Tacloban City","m_sigua":"Philippines, san pedro laguna","alin_mag":"Romania, Brasov","petarl":"Montenegro, Nikšić","shreeharsha1":"India, Tumkur","aftabzaki":"Pakistan, Islamabad","mdipasupil":"Philippines, Lipa City","ekizito_sebutemb":"Uganda, Kampala","17a4f3c2":"Vietnam, Nha Trang","marygracebuena":"Philippines, Apalit","otieno_john":"Kenya, Kikuyu","hgfm27":"Philippines, Bay","seniowei":"Uganda, Kampala","aurokanti":"India, chennai","nickyan08":"Philippines, Marikina","witty09":"Kenya, nairobi","jalcaide":"Philippines, CALAMBA LAGUNA","mpmmine":"Thailand, Watthana","nikol-trap":"Serbia, Belgrade","rakhmonov-sherzo":"Uzbekistan, Urgench","winstoniah6":"Kenya, Nairobi","patnaikshilpa":"India, Pune","joek7":"Kenya, Nairobi","kerubomercy":"Kenya, Kiserian","nyakundipurity":"Kenya, Nairobi","rwenji":"Kenya, Nakuru","munambobf":"Kenya, Nakuru","colvinnyakundi":"Kenya, Gilgil","955537ec":"Mexico, Tampico","bobasovic":"Serbia, Sombor","buddy100_abel":"Philippines, Hilongos","swabrana":"Uganda, Kampala","reyfi":"Philippines, Davao City","ksaad81":"Egypt, Mansoura","charusaini":"India, Indore","m_santic":"Serbia, Belgrade","majap":"Serbia, Belgrade","gillianjaika":"Kenya, Nairobi","yarick7":"Greece, Makrakomi","d_githiomi":"Kenya, Limuru","johnel20":"Philippines, marikina","kleative":"Kenya, Nyeri","otieno_david":"Kenya, Nairobi","ahmedmostafa114":"Egypt, Cairo","irenebonato":"Cambodia, Phnom Penh","carlitin21":"Paraguay, Asuncion","faith-opere":"Kenya, Nairobi","caliao_jb123":"Philippines, Ormoc","agnikanti":"India, Cuttack","myst1000":"Philippines, Pasay City","maskofdesign":"Egypt, Mansoura","soul5000":"Morocco, rabat","raphmaina":"Kenya, Nyeri","entozub":"Mexico, Leon de los Aldama","fridachalhoub":"United Arab Emirates, Dubai","fd79c785":"Montenegro, Niksic","jennifer_wambua":"Kenya, Nairobi","duncan_mosomi":"Kenya, Nairobi","ntulbo":"Philippines, Bacolod","jillchurch":"Philippines, Mati","zen777":"Ukraine, Odesa","a_muhanji":"Kenya, Nairobi","ktyn_paula":"Philippines, Quezon City","aileen_delacruz":"Philippines, Quezon City","62bd53b0":"Croatia, Slavonski Brod","gray_falcone":"Bosnia and Herzegovina, Kladanj","anne-wangechi":"Kenya, Nyeri","annmuriel":"Philippines, Marikina","varun5833":"India, Guwahati","titiano":"Nigeria, Kaduna","yenhtn":"Vietnam, Ho Chi Minh City","khulotzky":"Philippines, Morong Rizal","michael-nyarindo":"Kenya, Nairobi","f8304ee8":"Egypt, Mit Salsil","xitthuaung":"Myanmar, Yangon","ecordero":"Philippines, Bacolod City","kathyian":"Philippines, Iligan","fayegalang":"Philippines, Iligan City","bonface_munene":"Kenya, Nairobi","arvinl":"Philippines, Olongapo","izjema":"Panama, Volcan","lmoloboco":"Philippines, Calbayog City","enzcfernandez":"Philippines, Taguma","dksamal":"India, Jajpur","7c74eabf":"Thailand, Bangkok","c317875c":"Taiwan, Xinbeishi","nk_soreta":"Philippines, Calamba","firdausmardha":"Indonesia, Tangerang","jlumanlan":"Philippines, Mabalacat","corma":"Philippines, Davao City","grethbcndr":"Philippines, San Fernando","onad0609":"Philippines, Calamba City","mlayos":"Philippines, biñan","2cce8584":"Sri Lanka, Battaramulla South","rowenanatividad":"Philippines, cavite","josmurugi2":"Kenya, Nairobi","gperas":"Philippines, La Carlota City","kennedyoyugi":"Kenya, Voi","danouma":"Kenya, Nairobi","samwel_ouma":"Kenya, Mombasa","nash2589":"Philippines, Manila","zekeroa":"Philippines, Subic","edugaya":"Kenya, Nairobi","vdeleon":"Philippines, Laguna","komlyakova":"Kyrgyzstan, Bishkek","mwitidavid":"Kenya, NAIROBI","joestini":"Kenya, Nairobi","imjehayl":"Philippines, Butuan","adnan_ahmed100":"Pakistan, Lahore","lunadespierta":"Indonesia, Kebumen","mccondez":"Philippines, Cauayan City, Isabela","abdulrahamal":"Kenya, NAIROBI","wanjikugichia":"Kenya, Nairobi","l_roxas":"Philippines, Las Pinas","79beeb71":"Philippines, Bulacan","7fe7cca6":"Egypt, Cairo","japhetkoech":"Kenya, NAIROBI","sophietania":"Kenya, Nairobi","mihasarbu":"Romania, Urseni","al_villafuerte":"Philippines, Cagayan de Oro City","yzzarex":"Philippines, Bacolod City","cristinagrajo":"Philippines, Mabalacat","tringuyenxp1603":"Vietnam, Tuy Hoa","neusallen":"Thailand, Ko Tao","jdesagon":"Philippines, silang cavite","carmen_ghg":"Romania, Brasov","cr_ashok":"India, Madurai","artemisia41":"Italy, Torino","arvind4s":"Suriname, Paramaribo","c_cavina":"Italy, Castel San Pietro Terme","denyo1977":"Austria, Vienna","fidelis20":"Kenya, NAIROBI","naty-jaramillo":"Colombia, Medellin","6a8f4a97":"Philippines, Lala","marie_frances_z":"Philippines, Pasig City","aef1fe9f":"Thailand, Bangkok","veroniquem":"France, ferrieres","jplavoukos":"Greece, Piraeus","d9d605bf":"Israel, Nahariyya","admiraal_yonna":"Germany, Frankfurt am Main","tahermohamed":"Egypt, Cairo","abanoubkarmey15":"Egypt, Cairo","brenes":"Philippines, Las Pinas City","5076069d":"Chile, Los Angeles","viiviparma":"Portugal, Guimares","svedebornski":"Sweden, Malmoe","bpavel":"Ukraine, Cherkasy","41d94f04":"Malta, Pieta","charisse-medrano":"Philippines, Sto. tomas, Batangas","hirodrigo":"Hungary, Budapest","nolindelacruz":"Philippines, Cavite","2bf551db":"Philippines, Makati City","lunairetic":"Serbia, Novi Sad","lia-lp":"Spain, Barcelona","tonydavel":"Mexico, Hermosillo","paul_van_leusden":"Thailand, Pathum Thani","rustyful":"Philippines, Iligan","wolter":"Germany, Frankfurt am Main","patrodrigues":"Spain, Barcelona","iamavinashshetty":"India, MANGALORE","xristos":"Greece, Ioannina","alfinda":"Indonesia, Tangerang Selatan","c_jesus":"Portugal, Leiria","surgont":"Georgia, Batumi","gettje":"Ireland, Naas, Co Kildare","samarink":"Italy, Brindisi","martin_jeong":"South Korea, Suwon","ms62979":"Mexico, Zapopan","waipa-mark":"Uganda, kampala","cc7b2933":"Bosnia and Herzegovina, Sarajevo","jandeuikim":"Turkey, Eskisehir","bobapetrovic":"Serbia, Belgrade","6f3172db":"Philippines, Marikina City","colinamartin":"Philippines, Sibulan","frexchard":"Philippines, Cebu","2814acb1":"Philippines, Pagadian","bongoc":"Hungary, Pilisvörösvár","5ee42780":"Egypt, Cairo","filipbonjovi":"North Macedonia, Kumanovo","752cff10":"Philippines, Antipolo","l_wainaina":"Kenya, Nairobi","sacredlight999":"Philippines, Bukidnon","cssornet":"Philippines, Quezon City","mighty_ok":"Armenia, Yerevan","vongola09":"Philippines, Calamba City","fcardia":"Poland, Gleznowo","zahouanikhaoula":"Morocco, Marrakesh","mdlaquian":"Philippines, Angeles City","bazan_l":"Andorra, Encamp","loyd27e":"Philippines, Cagayan de Oro","rhoda42":"Kenya, Nairobi","c_toledano":"Philippines, bacolod","bspaic":"Montenegro, Podgorica","oliva100":"Philippines, Morong","funzi84":"Croatia, Ceminac","yusatya":"Indonesia, Kota Bogor","7028d066":"Uganda, Kampala","ykarab":"Greece, Ioannina","kristoffersonty":"Philippines, Mandaue City","rafaelaspan":"Philippines, Talisay City","dojcinovic-neman":"Serbia, Nis","divyawork":"India, Hassan","susanarcena":"Philippines, Cavite City","joannperez":"Philippines, Rizal","manilsson22":"France, Vannes","rechi_chi":"Philippines, Caloocan","cd9b46d7":"Jordan, Amman","c_kawahito":"Japan, Tokyo","abanob939":"Egypt, Cairo","dian121":"Indonesia, Bandung","lumdq":"Argentina, Mar del Plata","milojevic-sladja":"Serbia, Batocina","dumarsais-marc_k":"Mexico, Tapachula","anna-h-h":"Japan, Fujisawa","nhingo":"Vietnam, Ho Chi Minh City","jrodis":"Philippines, Imus, Cavite","lindafitriani":"Indonesia, Jakarta","abad-ysa":"Philippines, Antipolo City","kayesornet":"Philippines, Quezon City","decklar":"Kenya, Nairobi","erlynt":"Philippines, Davao","milos_99":"Montenegro, Niksic","baldomarina":"Italy, Trento","smugisa":"Uganda, Kampala","nathnatworks":"Philippines, Malabon City","50ef216d":"Ukraine, Brovary","xanthe-":"Philippines, Davao City","shakung":"Philippines, Ubay","misscheese":"Philippines, San Pablo","nishant-trivedi":"India, NAGPUR","raderade":"Serbia, Belgrade","rabwooniarthur":"Uganda, kampala","vladimirst":"Serbia, Čačak","may_ann_rillera":"Philippines, San Fernando City","copyeve35":"Nigeria, Kaduna","premiumpotato":"Philippines, Zamboanga","maiaarriola0920":"Philippines, Cavite","stlflores":"Philippines, Quezon City","gupana_naichelle":"Philippines, Barobo","nking69":"Philippines, Cainta","iamerikaquino":"Philippines, Dasmarinas City","913ee71d":"Sri Lanka, Middeniya","satish_kushwah":"India, New Delhi","2bf12fcf":"Philippines, Cebu City","hwijemanna":"Sri Lanka, Horana","mf-si":"France, Ferrières","gutang_rosedelyn":"Philippines, Paranaque","mphilippe":"Philippines, Manolo Fortich","edoker":"Nigeria, Lagos","0tabek":"Uzbekistan, Urgench","ef61185f":"Philippines, Marikina City","dchinthanie":"Sri Lanka, Kandy","94963ee3":"Uruguay, Montevideo","89f8717b":"Philippines, Lapu-Lapu City","jamoliddin_47":"Uzbekistan, Karshi","anitadz":"Bosnia and Herzegovina, Sarajevo","65749968.0":"India, Manjeri","danijeladostan":"Serbia, Nis","mrmalikov":"Uzbekistan, Tashkent","yumichellelim":"Philippines, Paranaque City","khudaybergan93":"Uzbekistan, Urgench","jinad":"Sri Lanka, Horana","conradoemerick":"Brazil, Florianopolis","tiraki":"Georgia, Batumi","octone05":"Philippines, Marikina City","eduardomarquez":"Argentina, City Bell","holyltd":"Mexico, Pueblo Viejo","robelai":"Vietnam, Ho Chi Minh City","allegionjr":"Philippines, Baras, Rizal","murambasimeon":"Kenya, Kilifi","sclaire_q":"Philippines, Quezon City","kvalentin":"Hungary, Dombovar","rjyu":"Philippines, paranaque","krystillesabio":"Philippines, Jiabong","anabrin06":"India, Calcutta","etangalova":"Bulgaria, Sofia","a_gamarcha":"Philippines, Sibunag","katerinamalinova":"Poland, Warsaw","steviandra":"Indonesia, DKI Jakarta","8c26dac1":"North Macedonia, Kumanovo","amukambya":"Uganda, Kampala","fab895ff":"Philippines, Bayugan","rockymar":"Philippines, La Trinidad","d8bd83df":"Egypt, Al Mansurah","263f451b":"Philippines, Antipolo","stonjohn24":"Philippines, Las Pinas City","jestine-wee":"Philippines, Dumaguete City, Negros Oriental","valeriechu":"Taiwan, Taipei","25b6c3e4":"Philippines, Cebu City","al_cyzis":"Philippines, La Trinidad","johanna_maris":"Philippines, Cebu City","motzuliq":"Romania, Roman","monihavli":"Czech Republic, Brno","jackie_cabz88":"Philippines, Panabo","caterinagioia":"Hungary, Budapest","agathabigo":"Taiwan, Taipei","mmuthii":"Kenya, Nairobi","johnalamares":"Philippines, Legazpi City","anhphan-vn":"Vietnam, Hue","bongalonmarice54":"Philippines, Malaybalay city","evelynjoque":"Chile, El Carmen","raidenanne":"Philippines, Cebu City","yukosuzuki":"Japan, Fuji City","brandonman2k":"Philippines, Manila","joanneaika":"Philippines, Quezon City","sashko-kuk":"Ukraine, Ivano-Frankivsk","jealou":"Philippines, Davao","irevail8":"Japan, Yabu","1c1c0c71":"Philippines, Dasmarinas","janja-pavlovic":"Serbia, Beograd","fe827544":"Mexico, Torreon","umashankar_hj":"India, Davanagere","safarovulugbek":"Uzbekistan, Urgench","claire_natad":"Philippines, Naga","pallidamors":"Philippines, Pasig City","windean":"Philippines, Binan","elenamaety":"Philippines, Mandaue City","catdominguez":"Philippines, Guiguinto","a_coral":"Mexico, Mérida","maricarcabiltes":"Philippines, Talisay City","tijana_ilic":"Serbia, Leposavic","44b274b3":"Nigeria, Oleh","josephvillanueva":"Philippines, Olongapo City","msecretaria":"Philippines, Talisay City, Cebu","ruthgerada":"Philippines, iloilo","13a07442":"Myanmar, Yangon","marcolentini":"Italy, Reggio nell'Emilia","theresego":"Philippines, Paete","w32emman":"Philippines, Davao City","cherrylcs":"Philippines, Marikina City","anicajoksovic":"Montenegro, Niksic","ajklavin":"Greece, Pireus","mbints":"Madagascar, Antananarivo","urosjov":"Serbia, Belgrade","0a1e9274":"Nigeria, Lagos","c7807e0b":"Philippines, Cebu City","glendadesagun":"Philippines, Tagaytay City","9c259824":"Serbia, Belgrade","ad762950":"Montenegro, Kolasin","hanigee":"Philippines, Davao","acapumpue":"Philippines, Tarlac City","prakashsa98":"Sri Lanka, Kotagala","roannep":"Philippines, Plaridel","joiebluxe":"Philippines, Tagum City","lserrate":"Bolivia, La Paz","hanny_kim":"Vietnam, Ho Chi Minh City","nethmar":"Sri Lanka, Kurunegala","r_siongco":"Philippines, Binan","charisseportiaga":"Philippines, Imus, Cavite","arantisi13":"Turkey, Istanbul","adrianaroland":"Hungary, Debrecen","6c55227f":"Serbia, Futog","valeskakubik":"Czech Republic, Prague","praveena1190":"Malaysia, Kuala Lumpur","pia_villacorta":"Philippines, Sibonga","dtaeza":"Philippines, Antipolo City","maimayita":"Philippines, Iloilo City","limejuice08":"Philippines, Quezon","lucabolognesi":"Thailand, Mae Sot","abedino":"Thailand, Chiang Mai","mrronyvyas":"India, Udaipur","r_raflores":"Philippines, Pagsanjan","priya_dda":"India, Udaipur","rgrajo":"Philippines, Mabalacat, Pampanga","matheus-verona":"Hungary, Budapest","joem76":"Israel, Haifa","2318-04-01 00:00:00":"Philippines, Tacloban","msulit":"Philippines, Ibaan","sjamilan":"Malaysia, Kuala Lumpur","79241157.0":"Philippines, Paranaque City","mahitab-fayez":"Egypt, Alexandria","6d783309":"Egypt, Cairo","88ea76d5":"Egypt, Cairo","gaabrielnunes":"Hungary, Budapest","steph_23":"Montenegro, Niksic","roschelleplaton":"Philippines, Tanauan","janjicmilena":"Serbia, Belgrade","rtdequit143":"Philippines, Butuan City","mhalu":"Philippines, Tacloban","juyal_santosh":"India, Sahibzada Ajit Singh Nagar","a_tuldanes":"Philippines, Calatrava","blurshack":"Malaysia, Kuala Lumpur","1ada9f24":"Egypt, Giza","djosce":"Philippines, Pasig City","luisaviles01":"Mexico, Santa Catarina","mario_angelo":"Philippines, Muntinlupa","e8a7371a":"India, Delhi","luisitoreyes":"Philippines, Mandaluyong","bcbanzon1004":"Philippines, Olongapo","asebial":"Philippines, Mandaluyong City","0dcee2bd":"North Macedonia, Skopje","mayzemd":"Philippines, Angeles City, Pampanga","55e7f9e3":"Romania, Iasi","oena":"Romania, Urseni","hyeny72":"Dominican Republic, La Romana","conradcalaguas":"Philippines, Angeles City","mabarlan":"Philippines, Malabon","iamerl":"Philippines, Daanbantayan","72157e4c":"Chile, Santiago","francisco_ol":"Portugal, Lisbon","ryan6090":"Philippines, Talisay","gjsuela":"Philippines, Davao","wenday13":"Philippines, Talisay City","kulimlim":"Philippines, Kalookan","theyam11":"Philippines, Cagayan De Oro City","hannayoustina":"Egypt, Egypt","sonarin-toun":"Cambodia, Phnom Penh","bridgetr75":"Hungary, Miskolc","m_mulig":"Philippines, Mandaue City","mlluch":"Philippines, QC","thuongdo":"Vietnam, Quang Ninh","diocontext":"Israel, Orot","amandacalluf80":"Brazil, Curitiba","maryrose03":"Philippines, Davao City","lidijakendjel":"Serbia, Belgrade","jayabalan56":"India, Chennai","ea5e3148":"Egypt, Cairo","rathakanha":"Cambodia, Siem Reap","c9546e03":"Nepal, Pokhara","donquijote88":"Serbia, Cacak","f399d0af":"Philippines, Davao","wpremasiri":"Sri Lanka, Kurunegala","sayafernandes":"Hungary, Budapest","manasak13":"India, Bengaluru","abitbol":"France, Eragny","fe535b21":"Philippines, Bacolod City","kerollous13":"Egypt, Cairo","albertolemacasa":"Ecuador, Quito","aalbastawesy":"Egypt, Al Mansurah","aidus_1708":"Philippines, Iligan","d_teloren":"Philippines, Bohol","jaroslava":"Czech Republic, Jihlava","cassie-crt":"India, Chennai","salma_here":"Philippines, General Santos City","karenperez":"Philippines, Mandaue City","adam_prochacki":"Poland, Warsaw","airdres":"Colombia, Bogota","claire_hwang":"Thailand, Bangkok","nik-yuliana":"Bulgaria, Sofia","serenazoto":"Albania, Tirana","daaa165e":"Ethiopia, Addis Ababa","andregiao":"Mexico, Playa del Carmen","ahaung":"Myanmar, Yangon","9dae2956":"Serbia, Belgrade","marchelos":"Venezuela, Cabimas","mirjalol91":"Uzbekistan, Kogon","ff9fac6e":"Turkey, Cesme","falcepatic":"Philippines, Puerto Princesa","paolot93":"Philippines, Paranaque","jokerue":"Serbia, Uzice","josemiguelabiera":"Philippines, Dumaguete City","arshadmazlan":"Malaysia, Selangor","nzrkn":"Georgia, Tbilisi","chikaoka":"United Kingdom, Wakefield","olla_causic":"Serbia, Beograd","evelasquez95":"El Salvador, San Salvador","bsvblanca":"Mexico, Catemaco","onoka_terrence":"Kenya, Mombasa","kimberlyremigio":"Philippines, Pampanga","gaigai":"Philippines, Pagadian City","g_molave":"Philippines, Lapu-Lapu City","bmircovic":"Hungary, Pilisvörösvár","lucky_al":"Turkey, Istanbul","21bed14d":"Philippines, Hilongos","samiraayoubi":"Turkey, Kayseri","michellejan":"Philippines, Davao City","51a07292":"Estonia, Viimsi","adam_kwiecien":"Poland, Bielsko-Biala","jayarzaldarriaga":"Philippines, cebu","f44ef745":"Uganda, Kampala Central Division","alemany":"Hungary, Eger","nilayber":"Turkey, İZMİR","jelenas85":"Montenegro, Niksic","sara_kej":"Montenegro, Niksic","a_origi":"Kenya, Nairobi","juliusmariano":"Philippines, Davao City","ibrajimix":"Bosnia and Herzegovina, Sarajevo","6b090ab8":"Egypt, C, Cairo","6a0df4b5":"New Zealand, Motueka","nzahouani":"Morocco, Beni-Mellal","pafrit":"Cyprus, Pervolia, Larnaca","arsene_razvan":"Romania, Cluj-Napoca","daisybuscato86":"Philippines, Sibulan","p_wasari":"Kenya, Nairobi","raadza":"Bosnia and Herzegovina, Tojsici","d8d87740":"Mexico, Cholula","rwijanarko":"Indonesia, Balikpapan","sheenamariedelac":"Philippines, Bacolod City","ali0hassan1":"Egypt, Cairo","9ab37b3a":"Mozambique, Chimoio","erniecrisserna":"Philippines, Infanta","39061c4f":"Mozambique, Maputo","waiyan_htet":"India, Vadodara","agmp26":"Philippines, Bukidnon","sispearl":"Philippines, Catbalogan","3041a433":"Malaysia, Bintulu","d08e918b":"Egypt, Cairo","lensa":"Ukraine, Bucha","v-laen":"Philippines, Cebu","ernestochacon":"El Salvador, SOYAPANGO, SAN SALVADOR","9f2431bb":"Indonesia, South Tangerang","jojeegonzaga251":"Philippines, Cebu City","skmacapagal":"Philippines, Imus","rosythuy":"Vietnam, Ho Chi Minh","junior_kelly":"Haiti, Croix-des-Bouquets","1628376b":"Philippines, Sablayan","vriel":"Indonesia, Surakarta","theobserver":"Philippines, Sagay City","princesschie":"Philippines, Cavite City","romertolentino":"Philippines, Tanauan","fezdarma":"Indonesia, Jakarta Barat","herisut":"Indonesia, Batam City","5c24196c":"Panama, Panama","maryrosemaranan":"Philippines, Calamba","dave0421":"Philippines, Davao","bhatt-shakuntala":"India, Udaipur","thohar":"Indonesia, D.I. Yogyakarta","74e69e1f":"Colombia, Bogota","banukannan":"India, Coimbatore","nor_calvo":"Philippines, Davao City","0910aff5":"South Africa, Cape Town","joelsumagang":"Philippines, Cebu","fronc":"Indonesia, Denpasar","psigne":"Philippines, Lapu-Lapu City","danieldepinto":"Indonesia, Yogyakarta","090af75a":"Vietnam, Ho Chi Minh City","35617f5a":"Philippines, Iloilo","dsurianarayanan":"India, Bangalore","3b8956f4":"Philippines, Dipolog","arlynnealvarez":"Philippines, Palo","misschedo":"Nigeria, Lagos","franresu":"Philippines, San Fernando Pampanga","bibijon":"Uzbekistan, Urgench","bonmaina254":"Kenya, Voi","6a3ab00a":"Sri Lanka, Raddolugama","djaqura":"Serbia, Niš","mooncam":"Kenya, Nairobi","anesopa":"Bosnia and Herzegovina, Banja Luka","lazierc":"United Kingdom, Todmorden","9e94a0b7":"Thailand, Mueang Nonthaburi","ttogetherasonee":"Turkey, BURSA","hhana":"South Korea, Goyang Kyunggi","irish_kram":"Philippines, Davao City","mgiga":"Philippines, Pasig","mjedab":"Philippines, Valenzuela City","puppaman":"Thailand, Bangkok","glynq":"Philippines, Laguindingan","moro_ricarmela":"Philippines, Tayabas","sauravkhandelwal":"India, Bangalore","mercefort":"Spain, Barcelona","san-su":"Myanmar, Yangon","sturkoglu":"Turkey, İstanbul","0cde00e0":"Egypt, Shubra al Khaymah","victoriaevert":"Turkey, Mahmutlar","85e401dd":"Montenegro, Podgorica","rathasok":"Cambodia, Battambang","hannah-90":"Tunisia, Tunis","paulriparip":"Philippines, Rizal","zsolt_bm":"Hungary, Debrecen","sarafa89":"Iceland, Reykjavik","anna1875":"Romania, Oradea","gerdmismo":"Venezuela, Santa Elena de Uairen","rovir_joseph":"Philippines, Baguio City","adriananthony":"Philippines, Pampanga","zap_eric":"Philippines, Morong Rizal","b3n3d1ctdgzm4n":"Philippines, Baguio","juhana":"Andorra, Sant Julia de Loria","ribaruba":"Brazil, Sao Paulo","674c36ab":"Chile, Santiago","lenalcantara":"Philippines, Makati","a_sapada":"Indonesia, Makassar","o_pshenychnykova":"Ukraine, Kharkiv","f04e2937":"Singapore, Singapore","erwinblurete":"Philippines, Cavite","deus_unico":"Philippines, Makati City","bhavya_rai":"India, Bangalore","smileawhile4u":"India, Bangalore","hoantv":"Vietnam, Ho Chi Minh","e155a564":"Philippines, Antipolo","jamesmaverick":"Philippines, Pampanga","hanifahrachman":"Indonesia, Balikpapan","yamalaya":"Philippines, Marikina","hsiaowenw":"Taiwan, Miaoli","dumak":"Montenegro, Nikšić","yrimu":"Kenya, Nairobi","prem4998":"India, Mayiladuthurai","savagemkd":"North Macedonia, Skopje","0feff53e":"North Macedonia, Skopje","naira_cintra":"Brazil, São Paulo","da98c2df":"Egypt, Embaba","aditya_joshi8718":"India, Udaipur","allyenna":"United Kingdom, London","zahouanijalal":"Morocco, Rabat","ethanjamesej":"Philippines, Tagbilaran","irin-iron":"Turkey, Derince","ayman-habib":"Egypt, Mansoura Qism 2","eokoaze":"Nigeria, Kaduna","hermaver":"Philippines, Cavite","jkgarces":"Philippines, Las Pinas City","danamusan":"Indonesia, Mataram","kmlucero":"Philippines, Surigao","ncadag":"Philippines, Cebu City","wan-are":"Malaysia, Putrajaya","bluberrry":"Philippines, Taytay Rizal","bunchansokkia":"Cambodia, Phnom Penh","h_okano":"Japan, Tochigi","ngmhanh0610":"Vietnam, Ho Chi Minh City","miftah_zuhdi":"Indonesia, Cirebon","b1b9a120":"North Macedonia, Bitola","camille_villegas":"Philippines, Davao City","katrina_tina":"Philippines, Cabuyao","taniajayasinghe":"Sri Lanka, Kandy","ehsan_haque":"Bangladesh, Dhaka North City Corporation","94f2aa80":"Montenegro, Bar","jasmalabuyoc":"Philippines, San Pablo City","bursaczeljka":"Serbia, Subotica","vladimir_ilchev":"Bulgaria, Blagoevgrad","kimberlynflores":"Philippines, Marikina City","biljana-paskoski":"Serbia, Belgrade","kumiko_i":"Thailand, Saraphi","amribrahim99":"Egypt, Mansoura","leiden05":"Philippines, Malolos City","l_tjandra":"Indonesia, Periuk","hermac":"Philippines, Davao","sncadorniga":"Philippines, Quezon City","9fd513bf":"Philippines, Tacloban","jdeocampo":"Philippines, Antipolo","janetironde":"Kenya, Nairobi","tanya_marcok":"Serbia, Kisac","paulomalapitan":"Philippines, Laguna","alina_shevchuk":"Georgia, Kutaisi","selva4181":"India, Chennai","danutza26":"Romania, Timisoara","kplee":"Malaysia, kuala lumpur","jassie":"Philippines, Manolo Fortich","d37834af":"Philippines, Iloilo","ocastroverde":"Philippines, Lipa City","nthy":"Vietnam, Vinh Yen","dispanurat-visut":"Thailand, Bangkok","stellacar":"Philippines, Manila","roxieq27":"Philippines, Lala","josuamor":"Philippines, Quezon City","vujacic":"Serbia, Novi Sad","kleinhanna":"Austria, Weissenbach","pengan":"Cambodia, Phnom Penh","538124ab":"India, Jeypore","macgyverg":"Hungary, Budapest","vivieradollosa":"Philippines, Bacolod","airmaggie":"Netherlands, Hilversum","mariso":"Uruguay, Maldonado","gscap72":"Italy, Santhi","e_nyakebati":"Kenya, Mlolongo","genita_maricar":"Philippines, Tubigon, Bohol","aracelyne":"Indonesia, Tangerang","harneetkaur13":"India, Amritsar","b_makkar":"India, Amritsar","paulya":"France, Montauban","nyawesh":"Kenya, Nairobi","malavanja":"Serbia, Belgrade","hojungp":"Singapore, Singapore","f198818b":"Thailand, Bangkok","sethahang168":"Cambodia, Phnom Penh","d523800e":"Nepal, Pokhara","1f5992e1":"Nepal, Pokhara","valentinorametta":"Italy, Amantea (Cs)","tor_norwegian":"Bulgaria, Bansko","mark26a":"Philippines, Manila","arbolario_fma":"Philippines, Davao City","klepyz":"Indonesia, Sleman","b_jay82":"Philippines, Cavite","vojkanvojnovski":"Serbia, Belgrade","monica-carrillo":"Mexico, Veracruz","26779.0":"Philippines, Tarlac","eddiemancilla":"Philippines, Daet","nonoronuel":"Philippines, Manila","prabhakaran194":"India, Chennai","jesusinside":"Venezuela, Anzoategui","martinschwarzer":"Malta, Sliema","igor_kojadinovic":"Montenegro, Niksic","jmikulec":"Czech Republic, Uhrice","c0ef395a":"Serbia, Obrenovac","headtrick":"Uzbekistan, Samarkand","hassan54000":"Pakistan, Lahore","stuartmackenzie":"United Kingdom, Brighton","dexi87":"Montenegro, Niksic","rsquare":"France, Villefranche sur Saône","paus55":"Indonesia, Mataram","kanpassa":"Thailand, Bangkok","ayarmurakami":"Japan, Otsu","660688fb":"Nepal, Pokhara","1671cd3f":"Indonesia, Jakarta","joannecataylo":"Philippines, Dumaguete","rene-it":"Singapore, Singapore","darkovuckovic":"Serbia, Grdelica","igorovsky":"Serbia, Novi Sad","55def4cc":"Czech Republic, Cesky Tesin","kieranfitzpatric":"Ireland, Cork","cequibal":"Philippines, Quezon City","fabella_keith":"Philippines, Cebu","avaldezjr":"Philippines, Batangas","jessicasilva28":"Mexico, Zapopan","luvchic":"Philippines, Bacolod City","antonovaand":"Bulgaria, Vratsa","derrickmurithi":"Kenya, Nairobi","mariali":"Finland, Tampere","rowenpascua":"Philippines, Olongapo","jsedlo":"Czech Republic, Prague","sleiria":"Portugal, Lisboa","krimnlrd":"Philippines, Las Pinas","bensdork":"Philippines, Tacloban City","khrisellypangan":"Philippines, General Trias, Cavite","anamaria-p":"Romania, Oradea","emil1987":"Serbia, Backa Topola","60bb7659":"Philippines, Valenzuela","jennifersutton":"Egypt, Sharm El-Sheikh","obeying":"United States, Summerfield","amelieb27":"United States, Brecksville","m_yoshiki":"United States, Mountain View","mikako-stone":"United States, Aurora","fukuriko":"United States, Portland","ben_ben23":"Greece, Athens","064c2ba6":"Mexico, Hunucma","adela_an":"United Kingdom, Falkirk","snatx":"Portugal, Porto","blua":"Portugal, Vila Nova de Gaia","landriiashyk":"Ukraine, Lashkivka","thuotari":"Spain, Benalmadena","lukas_sidor":"Slovakia, Zilina","brindusaavas":"Austria, Gleisdorf","kcizeski":"Brazil, Florianópolis","d_vuletic":"Montenegro, Podgorica","mykhaylo_fedor":"Spain, Ribarroja del Turia","danieljurasek":"Croatia, Slavonski Brod","simonica":"Romania, Brasov","csillaegei":"Romania, Turda","deyna":"Romania, Hunedoara","amarok":"Spain, Calp","vicbuck":"Brazil, Niterói","otdanae":"Greece, Kavala","92db6edc":"Croatia, Slavonski Brod","samsanjuan":"Philippines, Zamboanga City","sildi":"Romania, Joseni","simonattila":"Romania, Joseni","mishavil":"Ukraine, Kyiv","ok2805":"Ukraine, Zaporizhzhia","sangreal2009":"Ukraine, Brovary","sjoshuadarth":"India, Kolar","medea_nona":"Croatia, Pula","yuko_sd":"United States, San Diego","erdemkar":"United States, Santee","halliea":"United States, New Orleans","aprilnicolemedia":"United States, TX, Watauga","aleksandaranicic":"Serbia, Subotica","love_revereal":"Philippines, Iloilo City","jkjuanir":"Philippines, Lapu-Lapu City","2ec8dea4":"Serbia, Stara Moravica","anniesdream2020":"United States, Villa Rica","aline-kinzo":"United States, COLORADO SPRINGS","creangaraluca":"Romania, Brasov","michaelcavinta":"Philippines, Cavite City","scuy":"Philippines, Las Pinas City","eduardog7":"Venezuela, San Cristobal, Tachira","gbifernandes":"Turkey, Istanbul","luckahud":"Poland, Biala Podlaska","hfarfan":"Chile, Rancagua","demirkuran":"Turkey, Istanbul","outofcrepes":"France, Les Voivres","gawronolandia":"Poland, Bialystok","luisa-mercier":"Italy, Maglie","d607ee99":"Lithuania, Kaunas","dhezza_vhaldz":"Philippines, Catanduanes","prenat":"Kenya, Nakuru","bcoliat":"Philippines, Lapu-Lapu City","alister-low":"Malaysia, kota bharu","61abb8b6":"Philippines, Subic","iimarygee":"Philippines, Binan City","lsumida":"New Zealand, Christchurch","04a41f45":"Philippines, Isabela","gabclaudia":"Portugal, Turquel","eilahtannats":"Philippines, General Trias","isaac_cruz":"Mexico, Temixco, Morelos","8c574e94":"Latvia, Valmiera","grind3r":"Italy, Agrigento","eninam":"Bosnia and Herzegovina, Zavidovici","filipagouveia":"Portugal, Moreira","n_petkovski":"North Macedonia, Kumanovo","lavanyaindia":"India, Chennai","mona_oliveira":"United States, Puyallup","30240cf72e49c0f0":"Mexico, Tlaxcala","lorand2019":"Romania, Turda","janet_zh":"Singapore, Singapore","yokomaxwell":"United States, Hillsboro","alzami":"Croatia, Prelog","smart_cookie":"Lithuania, Klaipeda","8a1f634b":"Colombia, DC, Bogota","brideout":"United States, MO, Valley Park","db7efa52":"United States, CA, Ontario","rivas_daniel":"Peru, , Lima","c349e591":"Uruguay, MO, Montevideo","josearenasr":"Peru, , Lima","f9b6c00d":"United States, IL, Chicago","marinoborges":"Brazil, State of Parana, Curitiba","moses95":"Kenya, Thika","37b86511":"United States, NJ, Edison","8c2d7bdc":"India, TG, Hyderabad","cd1214e6":"India, RJ, Sawai Madhopur","eb58d5d9":"Tallinn, Estonia","angelica_platero":"Philippines, Metro Manila, Makati","f9c9660f":"India, Pune","charissa_camille":"Philippines, Laguna, San Pablo City","condeselaine":"Philippines, Cebu, Cebu City","jeffc30":"Philippines, Cavite, Cavite City","memeow28":"Philippines, , Cagayan de Oro City","9b5dd7d0":"Philippines, Davao, Davao","38a2d741":"Philippines, Calabarzon, Santa Rosa","mayannedexie":"Philippines, Makati","3690b951":"Philippines, Davao Del Sur, Davao","ching021683":"Philippines, WESTERN VISAYAS, Bacolod City","ronniegerona":"Philippines, Cavite","sharmainelapena":"Philippines, NCR, Caloocan City","angelica-negro":"Philippines, CENTRAL VISAYAS, Mandaue City","ainna_fathi":"Philippines, Calabarzon, Santa Cruz","2337764f":"Philippines, CALABARZON, Batangas","9de8daa0":"Philippines, DAVAO, Davao","renee-jackson":"Jamaica, , Portmore St. Catherine","racheed":"Jamaica, Kingston","tonishab":"Jamaica, portmore","d1ab476b":"Philippines, Mandaluyong","42373597":"Nigeria, LA, Lekki","9464ee40":"Jamaica, ST ANN, Browns Town","fsdemesa":"Philippines, NCR, Pasig City","8960819c":"Jamaica, KINGSTON, Kingston","manalo-roland_ma":"Philippines, , Caloocan","marvieolarte":"Philippines, , Sta. Margarita, Samar","marsheenac":"Jamaica, ST ANN, Ocho Rios","ihereira":"Venezuela, , San Cristobal","elle_borja":"Philippines, CALABARZON, Batangas","aleqsii":"Philippines, Baguio","a_lecito":"Philippines, San Jose Del Monte Bulacan","charles_yambao":"Philippines, Mabalacat, Pampanga","heterochromia09":"Philippines, Calaca","jessa_sumagit":"Philippines, Quezon City","justinhopaolo":"Philippines, Pasig City","kaevillanoy":"Philippines, Cainta","kith12690":"Philippines, Butuan City","leonardespejo":"Philippines, Quezon City","df14f3dc":"Philippines, Imus","alphamac29":"Philippines, Calaca","sheebmargarita":"Philippines, Batangas","702b22e5":"Philippines, Bulacan","dsnunga":"Philippines, Pasig City","8ab08e26":"Philippines, Quezon City","c093fcca":"Philippines, Quezon City","1abfcc23":"Hungary, Budapest","iyamendoza":"Philippines, angono rizal","cessuyat":"Philippines, Quezon City","rickyuiux":"North Macedonia, Negotino","arvin-ocier":"Philippines, Cebu City","3f1c3513":"Philippines, Bacolod City","jayichon":"Philippines, Quezon City","auhsojoch":"Philippines, Mandaluyong City","joslinpamela":"Philippines, Quezon City","3d08da10":"India, Ernakulam","cf823cfe":"Philippines, San Carlos City","Dipak Jain":"India, GJ, Ahmedabad","Alex Adeyemo":"Nigeria, OY, Ibadan","Saurav Deo":"India, PB, Mohali","ivanasrb":"Serbia, , Bukovac","harunspahic":"Bosnia and Herzegovina, , Sarajevo","boraidrizaj":"Albania, TIRANE, Tirana","joygabila":"Philippines, Davao City","45add371":"Paraguay, Ciudad del Este","bil-bil":"Morocco, Casablanca","ggduchateau":"Romania, Urseni","4ca29182":"Paraguay, Fernando de la Mora","22415cdb":"Nicaragua, Managua","aitbellawiam":"Slovenia, izola","elraissana":"Egypt, Sharm El-Sheikh","d_sannino":"Bangladesh, Cox's Bazar","andresbarboza":"Mexico, Veracruz","laysa_thuany":"Hungary, Budapest","fe8a621d":"Dominican Republic, La Romana","stringa01":"Croatia, Lukoran","45d6548d":"Indonesia, Denpasar","98d8d910":"Thailand, Chiang Mai","freerock82":"Thailand, Phuket","3c65e274":"Egypt, Cairo","b5c5336f":"Indonesia, Jakarta","c_mugweru":"Kenya, Kerugoya","4c6d6e656204f28d":"Indonesia, Balikpapan","moonrage":"Philippines, Marikina City","mmonsanto":"Canada, Saskatoon","d_volinsky":"Israel, Harish","ec7458d9a786c1a5":"Peru, Lima","c22d1655":"United States, Liberty Hill","Renee Jackson Morgan":"Jamaica, , Portmore St. Catherine","Racheed Reid":"Jamaica, Kingston","Tonisha Broomfield":"Jamaica, portmore","Neil Tracy Macasaet":"Philippines, Mandaluyong","Sandra Onwuatuelo":"Nigeria, LA, Lekki","Kyle Black":"Jamaica, ST ANN, Browns Town","Fatima De Mesa":"Philippines, NCR, Pasig City","Teasha Jackson":"Jamaica, KINGSTON, Kingston","Roland Mark Manalo":"Philippines, , Caloocan","Marvie Olarte":"Philippines, , Sta. Margarita, Samar","Marsheena Cheddesingh":"Jamaica, ST ANN, Ocho Rios","Igor Hereira":"Venezuela, , San Cristobal","Charlene Closa":"Philippines, CALABARZON, Batangas","Eleonor Borja":"Philippines, CALABARZON, Batangas","Wen-R Ocapan":"Philippines, DAVAO, Davao","Ainna Fathi":"Philippines, Calabarzon, Santa Cruz","20b435b9":"Philippines, Pasig City","mark_daniel_v":"Philippines, Quezon City","65749968":"India, Manjeri","April2318":"Philippines, Tacloban","79241157":"Philippines, Paranaque City","26779":"Philippines, Tarlac","20b4b56e":"Israel, Nazerat 'Illit","44d22eed":"Mozambique, Chimoio","382391c0":"Philippines, Pasay","9e7bf42225a04bac":"India, Hyderabad"};
+document.getElementById('dbtag').textContent = Object.keys(LOCATION_DB).length.toLocaleString() + ' workers in database';
+
+// ---- Program definitions -------------------------------------------------
+// outFormat A: Account Name | Team | Freelancer Name | Username | Bill Code | Location | Engagement Relationship
+// outFormat B: Company Name | Team Name | Freelancer Name | Freelancer User ID | Location | Engagement Type | Bill Rate Code | Notes
+// Each program writes one tab. A program may have multiple upload "slots"
+// (e.g. Google = GTNP + EMEA) that merge into the same tab in slot order.
+const PROGRAMS = [
+  {id:'google', tab:'Google workers', label:'Google', fmt:'A', engStyle:'long',
+    slots:[
+      {key:'gtnp', name:'GTNP', account:'GTNP SC'},
+      {key:'emea', name:'EMEA', account:'GMS EMEA SC'},
+    ]},
+  {id:'indeed', tab:'Indeed workers', label:'Indeed (IMS SC)', fmt:'B', engStyle:'short',
+    slots:[{key:'indeed', name:'Indeed', account:'IMS  SC'}]},
+  {id:'survey', tab:'SurveyMonkeyMomentive', label:'SurveyMonkey / Momentive', fmt:'B', engStyle:'short',
+    slots:[{key:'survey', name:'SurveyMonkey', account:'SurveyMonkey Rev SC'}]},
+  {id:'shrm', tab:'SHRM workers', label:'SHRM (SHMS)', fmt:'A', engStyle:'long',
+    slots:[{key:'shrm', name:'SHRM', account:'SHMS - Rev SC'}]},
+  {id:'hitachi', tab:'Hitachi MS Programs', label:'Hitachi MS Programs (BR+DC+DM merged)', fmt:'A', engStyle:'long',
+    slots:[{key:'hitachi', name:'Hitachi', account:'HTE MS COS'}]},
+];
+
+// state keyed by slot key -> {rows, fileName, filled, blank, prog, slot}
+const state = {};
+
+// ---- CSV parsing ---------------------------------------------------------
+function parseCSV(text){
+  text = text.replace(/^\uFEFF/,'');
+  const rows=[]; let i=0, field='', row=[], q=false;
+  while(i<text.length){
+    const c=text[i];
+    if(q){
+      if(c==='"'){ if(text[i+1]==='"'){field+='"';i+=2;continue;} q=false;i++;continue;}
+      field+=c;i++;continue;
+    }
+    if(c==='"'){q=true;i++;continue;}
+    if(c===','){row.push(field);field='';i++;continue;}
+    if(c==='\r'){i++;continue;}
+    if(c==='\n'){row.push(field);rows.push(row);row=[];field='';i++;continue;}
+    field+=c;i++;
+  }
+  if(field.length||row.length){row.push(field);rows.push(row);}
+  return rows.filter(r=>r.length>1 || (r.length===1 && r[0].trim()!==''));
+}
+
+function idx(header, names){
+  for(const n of names){
+    const k=header.findIndex(h=>h.trim().toLowerCase()===n.toLowerCase());
+    if(k>=0) return k;
+  }
+  return -1;
+}
+
+// rank for choosing the representative row among a worker's transactions
+// prefer rows whose bill code ends with the highest level number; tie-break by total charges
+function levelScore(bill){
+  if(!bill) return -1;
+  const m=String(bill).match(/(\d+)\s*$/);
+  return m?parseInt(m[1],10):0;
+}
+
+function processExport(prog, account, text){
+  const rows=parseCSV(text);
+  if(!rows.length) throw new Error('empty file');
+  const H=rows[0];
+  const cTeam = idx(H,['Team','Team Name']);
+  const cName = idx(H,['Freelancer name','Freelancer Name']);
+  const cUser = idx(H,['Username','Freelancer User ID']);
+  const cAgency = idx(H,['Agency']);
+  const cVendor = idx(H,['Payroll Vendor (Optional)','Payroll vendor','Payroll Vendor']);
+  const cEngRel = idx(H,['Projected Engagement Relationship','Engagement Relationship','Engagement Type']);
+  // bill code: prefer literal Bill code, else G-Code. (EMEA has both 'Bill code' and 'Bill Code' - identical)
+  const cBill = idx(H,['Bill code','Bill Code','Bill Rate Code']);
+  const cGcode = idx(H,['G-Code','G-code','Gcode']);
+  const cCharge = idx(H,['Total charges','Total Charges']);
+  if(cUser<0) throw new Error('no Username / Freelancer User ID column found');
+
+  const billCol = cBill>=0 ? cBill : cGcode; // may be -1 (e.g. Hitachi has none)
+
+  const groups={};
+  for(let r=1;r<rows.length;r++){
+    const row=rows[r];
+    const u=(row[cUser]||'').trim();
+    if(!u) continue;
+    (groups[u]=groups[u]||[]).push(row);
+  }
+
+  const workers=[];
+  let filled=0, blank=0;
+  for(const u in groups){
+    const txns=groups[u];
+    let best=txns[0], bestScore=-2, bestChg=-1;
+    for(const t of txns){
+      const sc=levelScore(billCol>=0?t[billCol]:'');
+      const chg=cCharge>=0?parseFloat(t[cCharge]||'0')||0:0;
+      if(sc>bestScore || (sc===bestScore && chg>bestChg)){best=t;bestScore=sc;bestChg=chg;}
+    }
+    const name=(cName>=0?best[cName]:'')||'';
+    const team=(cTeam>=0?best[cTeam]:'')||'';
+    const bill=(billCol>=0?(best[billCol]||'').trim():'');
+
+    let engRaw='';
+    if(cEngRel>=0 && (best[cEngRel]||'').trim()) engRaw=(best[cEngRel]||'').trim();
+    else {
+      const ag=(cAgency>=0?best[cAgency]:'')||'';
+      const vd=(cVendor>=0?best[cVendor]:'')||'';
+      engRaw=(/payroll/i.test(ag)||vd.trim()) ? 'Payroll' : 'Independent Contractor';
+    }
+    let eng;
+    if(prog.engStyle==='short') eng = /payroll/i.test(engRaw)?'Payroll':'IC';
+    else eng = /payroll/i.test(engRaw)?'Payroll':'Independent Contractor';
+
+    const loc = LOCATION_DB[u] || '';
+    if(loc) filled++; else blank++;
+
+    workers.push({account, team, name, user:u, bill, loc, eng});
+  }
+  workers.sort((a,b)=> a.team.localeCompare(b.team) || a.name.localeCompare(b.name));
+  return {rows:workers, filled, blank};
+}
+
+// ---- Build XLSX rows for a program --------------------------------------
+function sheetData(prog){
+  // gather rows from every uploaded slot of this program, in slot order
+  let merged=[];
+  for(const slot of prog.slots){
+    const st=state[slot.key];
+    if(st) merged=merged.concat(st.rows);
+  }
+  if(!merged.length) return null;
+  if(prog.fmt==='A'){
+    const head=['Account Name','Team','Freelancer Name','Username','Bill Code','Location','Engagement Relationship'];
+    const body=merged.map(w=>[w.account,w.team,w.name,w.user,w.bill,w.loc,w.eng]);
+    return [head,...body];
+  } else {
+    const head=['Company Name','Team Name','Freelancer Name','Freelancer User ID','Location','Engagement Type','Bill Rate Code','Notes'];
+    const body=merged.map(w=>[w.account,w.team,w.name,w.user,w.loc,w.eng,w.bill,'']);
+    return [head,...body];
+  }
+}
+
+// ---- UI ------------------------------------------------------------------
+const grid=document.getElementById('grid');
+PROGRAMS.forEach(p=>{
+  const card=document.createElement('div');card.className='card';
+  const slotsHtml=p.slots.map(s=>`
+    <label class="drop" id="drop-${s.key}" data-slot="${s.key}">
+      <input type="file" accept=".csv" id="file-${s.key}">
+      ${p.slots.length>1?`<b style="color:var(--ink)">${s.name}</b> · `:''}Drop Custom Export CSV
+    </label>
+    <div class="status" id="st-${s.key}"></div>`).join('');
+  card.innerHTML=`
+    <h3><span class="dot"></span>${p.label}</h3>
+    <div class="meta">→ tab: <b>${p.tab}</b></div>
+    ${slotsHtml}`;
+  grid.appendChild(card);
+
+  p.slots.forEach(s=>{
+    const drop=card.querySelector(`#drop-${s.key}`);
+    const input=card.querySelector(`#file-${s.key}`);
+    const st=card.querySelector(`#st-${s.key}`);
+    const defaultLabel=drop.lastChild.textContent;
+
+    function handle(file){
+      const reader=new FileReader();
+      reader.onload=e=>{
+        try{
+          const res=processExport(p, s.account, e.target.result);
+          state[s.key]={...res, fileName:file.name, prog:p, slot:s};
+          drop.classList.add('done');
+          drop.lastChild.textContent=' '+file.name;
+          st.innerHTML=`<span class="ok">✓ ${res.rows.length} active workers</span> · ${res.filled} located${res.blank?`, <span class="warn">${res.blank} blank</span>`:''}`;
+        }catch(err){
+          st.innerHTML=`<span class="err">✗ ${err.message}</span>`;
+          delete state[s.key]; drop.classList.remove('done');
+        }
+        refresh();
+      };
+      reader.readAsText(file);
+    }
+    input.addEventListener('change',e=>{if(e.target.files[0])handle(e.target.files[0]);});
+    ['dragover','dragenter'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add('hot');}));
+    ['dragleave','drop'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove('hot');}));
+    drop.addEventListener('drop',e=>{const f=e.dataTransfer.files[0]; if(f)handle(f);});
+    drop._reset=()=>{drop.classList.remove('done');drop.lastChild.textContent=defaultLabel;st.innerHTML='';input.value='';};
+  });
+});
+
+const genBtn=document.getElementById('genBtn');
+const globalMeta=document.getElementById('globalMeta');
+function progsReady(){
+  return PROGRAMS.filter(p=>p.slots.some(s=>state[s.key]));
+}
+function refresh(){
+  const n=progsReady().length;
+  genBtn.disabled = n===0;
+  globalMeta.textContent = n? `${n} program${n>1?'s':''} ready` : 'No exports uploaded yet';
+}
+refresh();
+
+document.getElementById('resetBtn').addEventListener('click',()=>{
+  for(const k in state) delete state[k];
+  document.querySelectorAll('.drop').forEach(d=>d._reset&&d._reset());
+  document.getElementById('summary').classList.remove('show');
+  refresh();
+});
+
+genBtn.addEventListener('click',()=>{
+  const wb=XLSX.utils.book_new();
+  const sumBody=document.getElementById('sumBody'); sumBody.innerHTML='';
+  PROGRAMS.forEach(p=>{
+    const data=sheetData(p);
+    if(!data) return;
+    const ws=XLSX.utils.aoa_to_sheet(data);
+    const widths = p.fmt==='A'
+      ? [14,30,24,16,12,28,22] : [18,30,24,18,28,16,14,10];
+    ws['!cols']=widths.map(w=>({wch:w}));
+    XLSX.utils.book_append_sheet(wb, ws, p.tab);
+    // summary aggregated across slots
+    let total=0, filled=0, blank=0, parts=[];
+    p.slots.forEach(s=>{const st=state[s.key]; if(st){total+=st.rows.length;filled+=st.filled;blank+=st.blank;
+      if(p.slots.length>1) parts.push(`${s.name}: ${st.rows.length}`);}});
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td>${p.label} <span class="pill">${p.tab}</span>${parts.length?`<br><span class="meta">${parts.join(' · ')}</span>`:''}</td>
+      <td class="num">${total}</td>
+      <td class="num">${filled}</td>
+      <td class="num">${blank?`<span class="pill miss">${blank}</span>`:'0'}</td>`;
+    sumBody.appendChild(tr);
+  });
+  const now=new Date();
+  const mm=String(now.getMonth()+1).padStart(2,'0');
+  XLSX.writeFile(wb, `Active_Workers_Report_${now.getFullYear()}-${mm}.xlsx`);
+  document.getElementById('summary').classList.add('show');
+});
+</script>
+</body>
+</html>
