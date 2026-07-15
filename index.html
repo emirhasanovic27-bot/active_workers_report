@@ -78,7 +78,7 @@
   </div>
 
   <div class="note">
-    <b>How it works.</b> Each Custom Export is transaction-level (one row per day worked). The app de-duplicates to one row per active worker (by Username), keeping the most recent / highest-level entry. The <b>Location</b> column is never read from the export — it is looked up in an invisible internal database built from the previous monthly reports. If a username isn't in the database, Location is left blank. <b>Google</b> takes two exports — GTNP and EMEA — which merge into the one Google tab (GTNP first, then EMEA); upload only GTNP if there's no EMEA. <b>Hitachi</b> BR, DC and DM arrive in a single export and write to one <b>Hitachi MS Programs</b> tab with no sub-program distinction.
+    <b>How it works.</b> Each Custom Export is transaction-level (one row per day worked). The app de-duplicates to one row per active worker (by Username), keeping the most recent / highest-level entry. The <b>Location</b> column is never read from the export — it is looked up in an invisible internal database built from the previous monthly reports. If a username isn't in the database, Location is left blank. <b>Google</b> takes two exports — GTNP and EMEA — which merge into the one Google tab (GTNP first, then EMEA); upload only GTNP if there's no EMEA. <b>Hitachi</b> is a single export that is automatically split into three tabs by team — Brand Refresh → <b>Hitachi BR MS workers</b>, Marketing &amp; Creative Shared Services → <b>Hitachi DC MS workers</b>, Digital Communications &amp; Marketing → <b>Hitachi DM MS workers</b>.
   </div>
 </div>
 
@@ -103,8 +103,13 @@ const PROGRAMS = [
     slots:[{key:'survey', name:'SurveyMonkey', account:'SurveyMonkey Rev SC'}]},
   {id:'shrm', tab:'SHRM workers', label:'SHRM (SHMS)', fmt:'A', engStyle:'long',
     slots:[{key:'shrm', name:'SHRM', account:'SHMS - Rev SC'}]},
-  {id:'hitachi', tab:'Hitachi MS Programs', label:'Hitachi MS Programs (BR+DC+DM merged)', fmt:'A', engStyle:'long',
-    slots:[{key:'hitachi', name:'Hitachi', account:'HTE MS COS'}]},
+  {id:'hitachi', label:'Hitachi (BR / DC / DM)', fmt:'A', engStyle:'long',
+    slots:[{key:'hitachi', name:'Hitachi', account:'HTE MS COS'}],
+    splitByTeam:[
+      {tab:'Hitachi BR MS workers', team:'Brand Refresh'},
+      {tab:'Hitachi DC MS workers', team:'Marketing & Creative Shared Services'},
+      {tab:'Hitachi DM MS workers', team:'Digital Communications & Marketing'},
+    ]},
 ];
 
 // state keyed by slot key -> {rows, fileName, filled, blank, prog, slot}
@@ -207,23 +212,33 @@ function processExport(prog, account, text){
 }
 
 // ---- Build XLSX rows for a program --------------------------------------
-function sheetData(prog){
-  // gather rows from every uploaded slot of this program, in slot order
+function toAOA(prog, rows){
+  if(prog.fmt==='A'){
+    const head=['Account Name','Team','Freelancer Name','Username','Bill Code','Location','Engagement Relationship'];
+    return [head, ...rows.map(w=>[w.account,w.team,w.name,w.user,w.bill,w.loc,w.eng])];
+  } else {
+    const head=['Company Name','Team Name','Freelancer Name','Freelancer User ID','Location','Engagement Type','Bill Rate Code','Notes'];
+    return [head, ...rows.map(w=>[w.account,w.team,w.name,w.user,w.loc,w.eng,w.bill,''])];
+  }
+}
+
+// Returns [{tab, data, count, filled, blank}] for a program (possibly several tabs).
+function sheetsFor(prog){
   let merged=[];
   for(const slot of prog.slots){
     const st=state[slot.key];
     if(st) merged=merged.concat(st.rows);
   }
-  if(!merged.length) return null;
-  if(prog.fmt==='A'){
-    const head=['Account Name','Team','Freelancer Name','Username','Bill Code','Location','Engagement Relationship'];
-    const body=merged.map(w=>[w.account,w.team,w.name,w.user,w.bill,w.loc,w.eng]);
-    return [head,...body];
-  } else {
-    const head=['Company Name','Team Name','Freelancer Name','Freelancer User ID','Location','Engagement Type','Bill Rate Code','Notes'];
-    const body=merged.map(w=>[w.account,w.team,w.name,w.user,w.loc,w.eng,w.bill,'']);
-    return [head,...body];
+  if(!merged.length) return [];
+  if(prog.splitByTeam){
+    return prog.splitByTeam.map(seg=>{
+      const rows=merged.filter(w=>w.team===seg.team);
+      return {tab:seg.tab, data:toAOA(prog,rows), count:rows.length,
+        filled:rows.filter(w=>w.loc).length, blank:rows.filter(w=>!w.loc).length};
+    }).filter(s=>s.count>0);
   }
+  return [{tab:prog.tab, data:toAOA(prog,merged), count:merged.length,
+    filled:merged.filter(w=>w.loc).length, blank:merged.filter(w=>!w.loc).length}];
 }
 
 // ---- UI ------------------------------------------------------------------
@@ -238,7 +253,7 @@ PROGRAMS.forEach(p=>{
     <div class="status" id="st-${s.key}"></div>`).join('');
   card.innerHTML=`
     <h3><span class="dot"></span>${p.label}</h3>
-    <div class="meta">→ tab: <b>${p.tab}</b></div>
+    <div class="meta">→ tab${p.splitByTeam?'s':''}: <b>${p.splitByTeam?p.splitByTeam.map(t=>t.tab).join(', '):p.tab}</b></div>
     ${slotsHtml}`;
   grid.appendChild(card);
 
@@ -296,19 +311,25 @@ genBtn.addEventListener('click',()=>{
   const wb=XLSX.utils.book_new();
   const sumBody=document.getElementById('sumBody'); sumBody.innerHTML='';
   PROGRAMS.forEach(p=>{
-    const data=sheetData(p);
-    if(!data) return;
-    const ws=XLSX.utils.aoa_to_sheet(data);
+    const sheets=sheetsFor(p);
+    if(!sheets.length) return;
     const widths = p.fmt==='A'
       ? [14,30,24,16,12,28,22] : [18,30,24,18,28,16,14,10];
-    ws['!cols']=widths.map(w=>({wch:w}));
-    XLSX.utils.book_append_sheet(wb, ws, p.tab);
-    // summary aggregated across slots
-    let total=0, filled=0, blank=0, parts=[];
-    p.slots.forEach(s=>{const st=state[s.key]; if(st){total+=st.rows.length;filled+=st.filled;blank+=st.blank;
-      if(p.slots.length>1) parts.push(`${s.name}: ${st.rows.length}`);}});
+    sheets.forEach(sh=>{
+      const ws=XLSX.utils.aoa_to_sheet(sh.data);
+      ws['!cols']=widths.map(w=>({wch:w}));
+      XLSX.utils.book_append_sheet(wb, ws, sh.tab);
+    });
+    // summary aggregated across the program's tabs
+    const total=sheets.reduce((a,s)=>a+s.count,0);
+    const filled=sheets.reduce((a,s)=>a+s.filled,0);
+    const blank=sheets.reduce((a,s)=>a+s.blank,0);
+    let parts=[];
+    if(p.splitByTeam) parts=sheets.map(s=>`${s.tab.replace(/Hitachi | MS workers/g,'')}: ${s.count}`);
+    else if(p.slots.length>1) p.slots.forEach(s=>{const st=state[s.key]; if(st)parts.push(`${s.name}: ${st.rows.length}`);});
+    const tabLabel = sheets.map(s=>s.tab).join(', ');
     const tr=document.createElement('tr');
-    tr.innerHTML=`<td>${p.label} <span class="pill">${p.tab}</span>${parts.length?`<br><span class="meta">${parts.join(' · ')}</span>`:''}</td>
+    tr.innerHTML=`<td>${p.label} <span class="pill">${tabLabel}</span>${parts.length?`<br><span class="meta">${parts.join(' · ')}</span>`:''}</td>
       <td class="num">${total}</td>
       <td class="num">${filled}</td>
       <td class="num">${blank?`<span class="pill miss">${blank}</span>`:'0'}</td>`;
